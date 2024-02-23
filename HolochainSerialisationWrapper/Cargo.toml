@@ -1,0 +1,12 @@
+[package]
+name = "holochain_serialisation_wrapper"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "holochain_serialisation_wrapper"
+crate-type = ["dylib"]
+
+[dependencies]
+holo_hash = "=0.1.6"
+holochain_zome_types = "=0.1.6"

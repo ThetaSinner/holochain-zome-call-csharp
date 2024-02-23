@@ -1,0 +1,23 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MessagePack" Version="2.5.140" />
+    <PackageReference Include="SauceControl.Blake2Fast" Version="2.0.0" />
+    <PackageReference Include="Sodium.Core" Version="1.3.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="holochain_serialisation_wrapper.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>
