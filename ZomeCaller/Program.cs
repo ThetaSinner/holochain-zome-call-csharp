@@ -9,74 +9,64 @@ namespace ZomeCaller;
 
 internal class Program
 {
+    // Needs to be configured to call your zome and function, currently hard-coded to one of my happs.
+    //
+    // Expects you to have done a `hc s generate <my-happ.happ>`, followed by an `hc s -f 8888, run`
+    // Once running, `hc s -f 8888, call list-apps` to get your agent key and dna hash, then attach an 
+    // app websocket port using `hc s -f 8888, call add-app-ws`. Use the agent key, dna hash and app port
+    // to update this file.
     static async Task Main(string[] args)
     {
-        var client = await Client.create();
+        // Connect to the admin port of Holochain
+        var adminClient = await Client.create(8888);
         
-        var signingKeyPair = client.generateSigningKeyPair();
+        // Create a keypair, extracting the public key into an 'identity' which is in AgentPubKey format
+        var signingKeyPair = adminClient.generateSigningKeyPair();
 
-        PrintByteArray("signing key", signingKeyPair.SigningKey);
+        // The 'identity' to assign the cap grant to
+        PrintByteArray("signing key", signingKeyPair.Identity);
+        // The public key that should be inside the 'identity' signing key.
         PrintByteArray("public key", signingKeyPair.KeyPair.PublicKey);
 
+        // This is test data retrieved from `hc s -f 8888, call list-apps`
         var testDnaHashStr = "uhC0kDNGYhRcOujFJDf-B39nK-veqq-I2FYyBWupaWQ91FVToz4xS";
         byte[] testDnaHash = FromBase64UrlSafe(testDnaHashStr[1..]);
         PrintByteArray("dna hash", testDnaHash);
 
-        var testAgentKeyStr = "uhCAk5ebLEPT4iv4m4A6dCAG1Mkzd2KVHZ7DZVd3yAIBfTuzGNsTs";
+        // This is test data retrieved from `hc s -f 8888, call list-apps`
+        var testAgentKeyStr = "uhCAkWSFV24oX-iY45knQ-znE7x3navgJEJOh_peaW9s3uPVY3viW";
         byte[] testAgentKey = FromBase64UrlSafe(testAgentKeyStr[1..]);
         PrintByteArray("agent key", testAgentKey);
 
-        var capSecret = client.createRandomCapSecret();
+        // Create a cap secret, this should be kept for the same lifetime as the signingKeyPair
+        var capSecret = adminClient.createRandomCapSecret();
         PrintByteArray("cap secret", capSecret);
 
-        var nonce = client.createRandomNonce();
+        // Create a nonce, this should be created for every zome call
+        var nonce = adminClient.createRandomNonce();
         PrintByteArray("nonce", nonce);
 
+        // Now +5m in microseconds
         var expires_at = (DateTimeOffset.Now.ToUnixTimeMilliseconds() + 5 * 60 * 1000) * 1000;
         Console.WriteLine("Expires at: " + expires_at);
 
-        var call = new ZomeCallUnsigned {
-            provenance = signingKeyPair.SigningKey,
-            cell_id_dna_hash = testDnaHash,
-            cell_id_agent_pub_key = testAgentKey,
-            zome_name = "drone_swarm",
-            fn_name = "get_current_lobbies",
-            cap_secret = capSecret,
-            payload = Array.Empty<byte>(),
-            nonce = nonce,
-            expires_at = expires_at,
-        };
-
-        var dataToSign = new byte[32];
-        try
-        {
-            HolochainSerialisationWrapper.call_get_data_to_sign(dataToSign, call);
-        } catch (Exception e)
-        {
-            Console.WriteLine("Failed to get: " + e.ToString());
-        }
-
-        PrintByteArray("data to sign", dataToSign);
-
-        var capAccess = new CapAccess { Assigned = new CapAccessAssigned { CapSecret = capSecret, Assignees = [testAgentKey] } };
-
+        // Build a capability access payload, allowing our 'identity' keypair to access all functions
+        var capAccess = new CapAccess { Assigned = new CapAccessAssigned { CapSecret = capSecret, Assignees = [signingKeyPair.Identity] } };
         var zomeCallCapGrant = new ZomeCallCapGrant { Tag = "zome-call-signing-key", Access = capAccess };
-
         var grantPayload = new GrantZomeCallCapabilityPayload([testDnaHash, testAgentKey], zomeCallCapGrant);
-
         var adminRequest = new AdminRequest("grant_zome_call_capability", grantPayload);
         var messageInner = MessagePackSerializer.Serialize(adminRequest);
 
-        var request = new WireMessage(1, "request", messageInner);
+        // Dump the capability request for debugging
+        var json = MessagePackSerializer.ConvertToJson(messageInner);
+        Console.WriteLine(json);
 
-        if (client.ClientWs.State != WebSocketState.Open)
-        {
-            Console.WriteLine("Websocket is not open");
-        }
+        var request = new WireMessage(1, "request", messageInner);
 
         try
         {
-            var response = await client.Send(request);
+            // Send the request to create a cap access record for our 'identity'
+            var response = await adminClient.Send(request);
             
             var adminResponse = MessagePackSerializer.Deserialize<AdminResponse>(response.Data);
             if (adminResponse.Type != "zome_call_capability_granted")
@@ -90,8 +80,88 @@ internal class Program
             Console.WriteLine("Failed to grant cap: " + e.ToString());
         }
 
-        await client.ClientWs.CloseAsync(WebSocketCloseStatus.NormalClosure, "finished", CancellationToken.None);
-        client.Handle?.Join();
+        // Create the unsigned zome call, to sign and then later convert to a real zome call
+        var zomeCall = new ZomeCallUnsigned
+        {
+            provenance = signingKeyPair.Identity,
+            cell_id_dna_hash = testDnaHash,
+            cell_id_agent_pub_key = testAgentKey,
+            zome_name = "drone_swarm",
+            fn_name = "get_current_lobbies",
+            cap_secret = capSecret,
+            payload = [0xc0], // Nil byte because my test zome function happens to have a signature of `zome_fn(_: ()) -> ExternResult<Vec<..>>`. This should be your msgpack encoded payload to your zome
+            nonce = nonce,
+            expires_at = expires_at,
+        };
+
+        var zomeCallDataToSign = new byte[32];
+        try
+        {
+            // Call into the `holochain_zome_types` crate to get a blake2b hash of the zomeCall
+            HolochainSerialisationWrapper.call_get_data_to_sign(zomeCallDataToSign, zomeCall);
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine("Failed to get data to sign: " + e.ToString());
+        }
+
+        // Sign the zome call hash with Ed25519, using the private key associated with our 'identity'
+        var signature = PublicKeyAuth.Sign(zomeCallDataToSign, signingKeyPair.KeyPair.PrivateKey);
+
+        Console.WriteLine(String.Format("got signature {0}", signature.Length));
+
+        // Copy all the unsigned zome call fields forward and add the signature to create a real zome call payload
+        var realZomeCall = new ZomeCall
+        {
+            CellId = [zomeCall.cell_id_dna_hash, zomeCall.cell_id_agent_pub_key],
+            ZomeName = zomeCall.zome_name,
+            FunctionName = zomeCall.fn_name,
+            Payload = zomeCall.payload,
+            CapSecret = zomeCall.cap_secret,
+            Provenance = zomeCall.provenance,
+            Signature = signature[0..64],
+            Nonce = zomeCall.nonce,
+            ExpiresAt = zomeCall.expires_at,
+        };
+
+        var appRequest = new AppRequest
+        {
+            Tag = "call_zome",
+            Data = realZomeCall,
+        };
+        var appRequestInner = MessagePackSerializer.Serialize(appRequest);
+
+        var zomeRequest = new WireMessage(2, "request", appRequestInner);
+
+        // Connect to an app websocket on Holochain. Note that this is going to change per run, so you'll need to update this to connect here!
+        var appClient = await Client.create(33564);
+
+        try
+        {
+            // Actually send the zome call, finally :)
+            var response = await appClient.Send(zomeRequest);
+
+            // Check that the response indicates success. My zome returns an empty array response so it's not very interesting, but the response data is here in `response.Data`
+            var adminResponse = MessagePackSerializer.Deserialize<AdminResponse>(response.Data);
+            if (adminResponse.Type != "zome_called")
+            {
+                throw new Exception("Got an error, wanted zome called");
+            }
+
+            Console.WriteLine("Zome called");
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine("Failed to call zome: " + e.ToString());
+        }
+
+        // This part is super buggy, please ignore. Shutting down the admin and app websockets. Expect this to fail and dump errors. That's fine as long as the code above printed `Zome called`
+
+        await adminClient.ClientWs.CloseAsync(WebSocketCloseStatus.NormalClosure, "finished", CancellationToken.None);
+        adminClient.Handle?.Join();
+
+        await appClient.ClientWs.CloseAsync(WebSocketCloseStatus.NormalClosure, "finished", CancellationToken.None);
+        appClient.Handle?.Join();
     }
 
     public static void PrintByteArray(string msg, byte[] bytes)
@@ -133,9 +203,9 @@ internal class Client
         ClientWs = clientWs;
     }
 
-    internal static async Task<Client> create()
+    internal static async Task<Client> create(int port)
     {
-        Uri uri = new("ws://localhost:8888");
+        Uri uri = new(String.Format("ws://localhost:{0}", port));
 
         ClientWebSocket ws = new();
         await ws.ConnectAsync(uri, CancellationToken.None);
@@ -169,12 +239,6 @@ internal class Client
         return response;
     }
 
-    internal async Task auth_creds()
-    {
-
-    }
-
-    // TODO private
     internal SigningKeyPair generateSigningKeyPair()
     {
         var keyPair = Sodium.PublicKeyAuth.GenerateKeyPair();
@@ -247,12 +311,12 @@ internal class Client
 internal class SigningKeyPair
 {
     public KeyPair KeyPair { get; }
-    public byte[] SigningKey { get; }
+    public byte[] Identity { get; }
 
     public SigningKeyPair(KeyPair keyPair, byte[] signingKey)
     {
         KeyPair = keyPair;
-        SigningKey = signingKey;
+        Identity = signingKey;
     }
 }
 
@@ -357,4 +421,45 @@ public class AdminResponse
 {
     [Key("type")]
     public string Type { get; set; }
+}
+
+[MessagePackObject]
+public class AppRequest
+{
+    [Key("type")]
+    public string Tag { get; set; }
+
+    [Key("data")]
+    public ZomeCall Data { get; set; }
+}
+
+[MessagePackObject]
+public class ZomeCall
+{
+    [Key("cell_id")]
+    public byte[][] CellId { get; set; }
+
+    [Key("zome_name")]
+    public string ZomeName { get; set; }
+
+    [Key("fn_name")]
+    public string FunctionName { get; set; }
+
+    [Key("payload")]
+    public byte[] Payload { get; set; }
+
+    [Key("cap_secret")]
+    public byte[] CapSecret { get; set; }
+
+    [Key("provenance")]
+    public byte[] Provenance { get; set; }
+
+    [Key("signature")]
+    public byte[] Signature { get; set; }
+
+    [Key("nonce")]
+    public byte[] Nonce { get; set; }
+
+    [Key("expires_at")]
+    public Int64 ExpiresAt { get; set; }
 }
